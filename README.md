@@ -1,6 +1,6 @@
 # Reel Explainer Bot
 
-**Share an Instagram reel to Telegram. Get back exactly what you wanted from it: the summary, the tools it mentioned, the steps, a fact check, or how to make one like it with AI.**
+**Share an Instagram reel, YouTube video or Facebook video to Telegram. Get back exactly what you wanted from it: the summary, the tools it mentioned, the steps, a fact check, or how to make one like it with AI.**
 
 A self-hosted Telegram bot. Gemini watches the whole video and listens to the audio, so it catches what's on screen and what's said, not just the caption. It runs free on Gemini's free tier and a free server.
 
@@ -11,6 +11,16 @@ A self-hosted Telegram bot. Gemini watches the whole video and listens to the au
 ## Why
 
 You save a reel because it mentions a tool, a recipe, a workflow or a claim. A week later you can't remember what it said, and rewatching it three times to catch a URL is painful. This bot turns a reel into text you can read in ten seconds and search later.
+
+## Supported links
+
+| Site | Links | How |
+|---|---|---|
+| Instagram | reels, posts, IGTV | Downloaded with yt-dlp, then uploaded to Gemini |
+| YouTube | videos, Shorts, `youtu.be` links, live replays | Gemini watches the public URL itself; nothing is downloaded |
+| Facebook | reels, videos, `fb.watch` and share links | Downloaded with yt-dlp, then uploaded to Gemini |
+
+Videos longer than `MAX_VIDEO_MIN` (default 20 minutes) are refused so one long video can't use up your free tier. Admins can switch sites off with `/set ENABLED_PLATFORMS instagram,youtube`. YouTube only works for public and unlisted videos, not private or age-restricted ones.
 
 ## What you can ask for
 
@@ -67,13 +77,13 @@ sudo chown -R 1000:1000 data   # Linux only
 docker compose up -d --build
 ```
 
-### Instagram cookies (usually needed)
+### Cookies for Instagram and Facebook (usually needed)
 
-Instagram blocks most logged-out downloads, so give the bot a session:
+Instagram, and often Facebook, block logged-out downloads, so give the bot a session. YouTube doesn't need one:
 
-1. Log in to Instagram in your browser with a **spare account**. Instagram can flag accounts used for downloading.
-2. Export the `instagram.com` cookies as `cookies.txt` with a "Get cookies.txt LOCALLY"-style extension.
-3. Send the file to your bot in Telegram as an admin. It's validated, saved, and your message is deleted. Or place it next to `bot.py`.
+1. Log in to Instagram and/or Facebook in your browser with **spare accounts**. Sites can flag accounts used for downloading.
+2. Export the cookies as `cookies.txt` with a "Get cookies.txt LOCALLY"-style extension.
+3. Send the file to your bot in Telegram as an admin. Each site's cookies replace only that site's old ones, so you can send Instagram and Facebook separately. Your message is deleted after saving. Or place the file next to `bot.py`.
 
 `cookies.txt` is a login secret. Never commit or share it.
 
@@ -104,7 +114,9 @@ Everything in [`.env.example`](.env.example) can also be changed at runtime with
 | `ALLOWED_USER_IDS` / `ADMIN_USER_IDS` | empty | Comma-separated Telegram user IDs |
 | `DEFAULT_SECTIONS` | `summary,takeaways,tools,steps,factcheck` | Pre-ticked for a user's first reel |
 | `MAX_CONCURRENT_JOBS` | `2` | Reels processed at once |
-| `MAX_VIDEO_MB` | `200` | Larger videos are refused |
+| `ENABLED_PLATFORMS` | `instagram,youtube,facebook` | Sites whose links are accepted |
+| `MAX_VIDEO_MIN` | `20` | Longer videos are refused |
+| `MAX_VIDEO_MB` | `200` | Larger downloads are refused |
 | `JOB_TTL_MIN` | `30` | How long follow-up buttons keep working |
 | `DATA_DIR` | project folder | Where `settings.json` and `prefs.json` are written |
 
@@ -139,7 +151,7 @@ user ticks sections ────────────────────
 
 ## Good to know
 
-- **Instagram's terms** don't allow automated downloading. This project is for personal, low-volume use of public content. You're responsible for how you use it.
+- **Instagram's and Facebook's terms** don't allow automated downloading. This project is for personal, low-volume use of public content. You're responsible for how you use it.
 - **Free-tier privacy:** on Gemini's free tier, Google may use inputs to improve its models. Only send public content.
 - **Free-tier limits** are per model and change over time. See yours in AI Studio. Each Explain tap uses one request.
 - AI answers can be wrong. Treat fact checks and tool prices as a starting point.

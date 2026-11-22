@@ -65,6 +65,16 @@ def _section_keys(value: Any) -> list[str]:
     return list(dict.fromkeys(keys))
 
 
+def _platforms(value: Any) -> list[str]:
+    from platforms import BY_KEY
+
+    keys = value if isinstance(value, list) else [k for k in re.split(r"[,\s]+", str(value or "").lower()) if k]
+    bad = [k for k in keys if k not in BY_KEY]
+    if bad or not keys:
+        raise ValueError("choose from: " + ", ".join(BY_KEY))
+    return list(dict.fromkeys(keys))
+
+
 @dataclass(frozen=True)
 class Spec:
     default: Any
@@ -73,7 +83,8 @@ class Spec:
     secret: bool = False
 
 
-DEFAULT_PROMPT = """You are watching an Instagram reel. Watch the full video AND listen to the audio.
+DEFAULT_PROMPT = """You are watching a video (an Instagram reel, YouTube video or Facebook video).
+Watch the full video AND listen to the audio.
 Answer ONLY the sections requested below, in the order given. Start each section with its heading
 in capitals on its own line. Plain text only, no markdown symbols like ** or #.
 Be specific: quote exact numbers, names and claims. If a section doesn't apply, say so in one line.
@@ -103,10 +114,14 @@ SPECS: dict[str, Spec] = {
     "GEMINI_FALLBACK_MODELS": Spec(["gemini-3.5-flash-lite"], _models, "Fallback models, comma-separated"),
     "GEMINI_TIMEOUT_S": Spec(90, _bounded_int(10, 600), "Per-call Gemini timeout in seconds"),
     "MAX_CONCURRENT_JOBS": Spec(2, _bounded_int(1, 10), "Reels processed at the same time"),
+    "ENABLED_PLATFORMS": Spec(
+        ["instagram", "youtube", "facebook"], _platforms, "Which sites' links the bot accepts"
+    ),
+    "MAX_VIDEO_MIN": Spec(20, _bounded_int(1, 600), "Longest video to explain, in minutes"),
     "MAX_VIDEO_MB": Spec(200, _bounded_int(5, 2000), "Largest video to download, in MB"),
     "ALLOWED_USER_IDS": Spec([], _ids, "Telegram user IDs allowed to use the bot"),
     "ADMIN_USER_IDS": Spec([], _ids, "Telegram user IDs allowed to run admin commands"),
-    "INSTAGRAM_COOKIES_FILE": Spec("cookies.txt", str, "Path to the Instagram cookies.txt"),
+    "INSTAGRAM_COOKIES_FILE": Spec("cookies.txt", str, "Path to cookies.txt (Instagram/Facebook/YouTube logins)"),
     "LOG_LEVEL": Spec("INFO", _level, "DEBUG, INFO, WARNING or ERROR"),
     "DEFAULT_SECTIONS": Spec(
         ["summary", "takeaways", "tools", "steps", "factcheck"], _section_keys,

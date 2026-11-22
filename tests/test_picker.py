@@ -6,7 +6,10 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test")
 os.environ.setdefault("GEMINI_API_KEY", "test")
 os.environ["LOG_FILE"] = ""
 
+from google.genai import types
+
 import bot
+from platforms import BY_KEY as PLATFORMS
 from sections import SECTIONS, build_section_block
 
 
@@ -52,7 +55,7 @@ class FakeQuery:
 
 
 def test_callback_data_fits_telegram_limit():
-    job = bot.ReelJob("abcd1234", "u", 1, 1, 1, [s.key for s in SECTIONS])
+    job = bot.ReelJob("abcd1234", "u", PLATFORMS["instagram"], 1, 1, 1, [s.key for s in SECTIONS])
     for row in bot.picker_keyboard(job).inline_keyboard:
         for b in row:
             assert len(b.callback_data.encode()) <= 64
@@ -115,5 +118,67 @@ def test_full_flow(tmp_path, monkeypatch):
         await bot.expire_job(job, delay=0)
         q = await press(f"m|{job.id}|tools", msg=job.more_msg)
         assert "expired" in q.answers[0]
+
+    asyncio.run(scenario())
+
+
+def test_youtube_uses_gemini_url_without_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "_PREFS_PATH", tmp_path / "prefs.json")
+    monkeypatch.setattr(bot, "is_allowed", lambda u: True)
+    monkeypatch.setattr(bot, "video_metadata", lambda url: {"title": "T", "uploader": "C", "duration": 60})
+
+    def no_download(*a):
+        raise AssertionError("YouTube must not be downloaded")
+
+    monkeypatch.setattr(bot, "download_reel", no_download)
+    monkeypatch.setattr(bot, "upload_video", no_download)
+    seen = {}
+
+    def fake_explain(uploaded, info, keys):
+        seen["uploaded"], seen["prompt"] = uploaded, bot.build_prompt(info, keys)
+        return "ok"
+
+    monkeypatch.setattr(bot, "explain_sections", fake_explain)
+
+    async def scenario():
+        sent = []
+        msg = FakeMsg(sent, "https://youtube.com/shorts/abcDEF12345?si=x")
+        u = SimpleNamespace(id=8)
+        update = SimpleNamespace(effective_user=u, effective_chat=u, message=msg)
+        ctx = SimpleNamespace(bot=FakeBot(sent), args=[])
+        await bot.handle_message(update, ctx)
+        job = next(j for j in bot.jobs.values() if j.user_id == 8)
+        await job.ready.wait()
+        assert job.error is None
+        assert "YouTube video" in job.picker_msg.text
+        q = FakeQuery(f"go|{job.id}", 8, job.picker_msg)
+        await bot.on_button(SimpleNamespace(callback_query=q), ctx)
+        part = seen["uploaded"]
+        assert isinstance(part, types.Part)
+        assert part.file_data.file_uri == "https://www.youtube.com/watch?v=abcDEF12345"
+        assert "C on YouTube" in seen["prompt"] and "Title: T" in seen["prompt"]
+        await bot.expire_job(job, delay=0)
+
+    asyncio.run(scenario())
+
+
+def test_too_long_youtube_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "_PREFS_PATH", tmp_path / "prefs.json")
+    monkeypatch.setattr(bot, "is_allowed", lambda u: True)
+    monkeypatch.setattr(bot, "video_metadata", lambda url: {"duration": 3 * 3600})
+
+    async def scenario():
+        sent = []
+        msg = FakeMsg(sent, "https://youtu.be/dQw4w9WgXcQ")
+        u = SimpleNamespace(id=9)
+        update = SimpleNamespace(effective_user=u, effective_chat=u, message=msg)
+        await bot.handle_message(update, SimpleNamespace(bot=FakeBot(sent), args=[]))
+        picker = sent[0]
+        for _ in range(50):
+            if "limit is" in picker.text:
+                break
+            await asyncio.sleep(0.01)
+        assert "180 min long; the limit is 20 min" in picker.text
+        assert not any(j.user_id == 9 for j in bot.jobs.values())
 
     asyncio.run(scenario())

@@ -1,7 +1,7 @@
 """Reel Explainer Bot.
 
-Send it an Instagram reel link on Telegram; it downloads the reel, has Gemini
-watch it (video + audio + caption), and replies with the full context.
+Send it an Instagram, YouTube or Facebook video link on Telegram; Gemini watches
+it (video + audio + caption) and replies with what you asked for.
 
 Secrets and defaults come from environment variables (or a local .env file).
 Admins can change settings, users, cookies and the prompt, and update or
@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import platform
-import re
 import secrets
 import shutil
 import sys
@@ -50,6 +49,9 @@ from telegram.ext import (
     filters,
 )
 
+from cookies import merge_cookies
+from platforms import BY_KEY as PLATFORMS_BY_KEY
+from platforms import PLATFORMS, Platform, canonical_youtube, find_videos, unsupported_platforms
 from sections import BY_KEY, SECTIONS, build_section_block, ordered
 from settings_store import SPECS, Settings
 
@@ -110,10 +112,6 @@ TELEGRAM_BOT_TOKEN = _required_env("TELEGRAM_BOT_TOKEN")
 if not settings.get("GEMINI_API_KEY"):
     raise SystemExit("Missing GEMINI_API_KEY. See .env.example.")
 
-REEL_URL_RE = re.compile(
-    r"https?://(?:www\.)?instagram\.com/(?:[\w.]+/)?(?:reel|reels|p|tv)/[\w-]+[^\s]*",
-    re.IGNORECASE,
-)
 TELEGRAM_LIMIT = 4000  # Telegram's hard limit is 4096; leave headroom.
 STARTED_AT = time.time()
 RESTART_EXIT_CODE = 3  # any non-zero exit makes systemd (Restart=always) start us again
@@ -139,24 +137,51 @@ def cookies_file() -> str | None:
 # ---------- download ----------
 
 
-def download_reel(url: str, workdir: Path) -> tuple[Path, dict]:
-    opts = {
-        "outtmpl": str(workdir / "reel.%(ext)s"),
-        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
-        "merge_output_format": "mp4",
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "max_filesize": settings.get("MAX_VIDEO_MB") * 1024 * 1024,
-        "socket_timeout": 30,
-        "retries": 3,
-    }
+class VideoTooLong(Exception):
+    pass
+
+
+def _check_length(info: dict) -> None:
+    limit = settings.get("MAX_VIDEO_MIN")
+    duration = info.get("duration") or 0
+    if duration > limit * 60:
+        raise VideoTooLong(
+            f"That video is {int(duration // 60)} min long; the limit is {limit} min "
+            "(an admin can change it with /set MAX_VIDEO_MIN)."
+        )
+
+
+def _ydl_base_opts() -> dict:
+    opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "socket_timeout": 30, "retries": 3}
     if cookie_path := cookies_file():
         opts["cookiefile"] = cookie_path
+    return opts
+
+
+def video_metadata(url: str) -> dict:
+    """Title, creator, description and duration without downloading. Best effort: {} on failure."""
+    try:
+        with yt_dlp.YoutubeDL({**_ydl_base_opts(), "skip_download": True}) as ydl:
+            return ydl.extract_info(url, download=False) or {}
+    except Exception as e:
+        log.info("No metadata for %s (%s); continuing without it", url, str(e).splitlines()[0][:200])
+        return {}
+
+
+def download_reel(url: str, workdir: Path) -> tuple[Path, dict]:
+    opts = {
+        **_ydl_base_opts(),
+        "outtmpl": str(workdir / "reel.%(ext)s"),
+        "format": "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/bv*[height<=720]+ba/b",
+        "merge_output_format": "mp4",
+        "max_filesize": settings.get("MAX_VIDEO_MB") * 1024 * 1024,
+    }
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+        info = ydl.extract_info(url, download=False)
         if info.get("_type") == "playlist" and info.get("entries"):
             info = next(e for e in info["entries"] if e)
+        _check_length(info)  # before spending time and disk on the download
+        info = ydl.process_ie_result(info, download=True)
     videos = sorted(workdir.glob("reel.*"), key=lambda p: p.stat().st_size, reverse=True)
     if not videos:
         raise RuntimeError("Download finished but no video file was found.")
@@ -215,6 +240,8 @@ def upload_video(video: Path):
 
 
 def delete_uploaded(uploaded) -> None:
+    if isinstance(uploaded, types.Part):
+        return  # a YouTube URL reference; nothing was uploaded
     try:
         gemini().files.delete(name=uploaded.name)
     except Exception:
@@ -222,9 +249,16 @@ def delete_uploaded(uploaded) -> None:
 
 
 def build_prompt(info: dict, keys) -> str:
+    creator = info.get("uploader") or info.get("channel") or "unknown"
+    if info.get("_platform"):
+        creator += f" on {info['_platform']}"
+    caption = info.get("description") or "(no caption)"
+    title = info.get("title") or ""
+    if title and title not in caption:
+        caption = f"Title: {title}\n{caption}"
     return settings.get("PROMPT").format(
-        uploader=info.get("uploader") or info.get("channel") or "unknown",
-        caption=(info.get("description") or "(no caption)")[:3000],
+        uploader=creator,
+        caption=caption[:3000],
         sections=build_section_block(keys),
     )
 
@@ -336,7 +370,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Ask the owner to run /allow with that ID."
         )
         return
-    text = "Send or share an Instagram reel link and I'll explain the whole thing."
+    text = (
+        "Send or share an Instagram reel, YouTube video/Short or Facebook video link, "
+        "pick what you want from it, and I'll explain it."
+    )
     if is_admin(update):
         text += "\n\nYou're an admin. /help lists the control commands."
     await update.message.reply_text(text)
@@ -348,16 +385,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"Private bot. Your user ID is {update.effective_user.id}.")
         return
 
-    urls = REEL_URL_RE.findall(update.message.text or "")
-    if not urls:
-        await update.message.reply_text("Send me an Instagram reel link (instagram.com/reel/...).")
+    enabled = settings.get("ENABLED_PLATFORMS")
+    videos = find_videos(update.message.text or "", enabled)
+    if not videos:
+        off = unsupported_platforms(update.message.text or "", enabled)
+        if off:
+            names = ", ".join(sorted({p.name for p in off}))
+            await update.message.reply_text(f"{names} links are switched off on this bot.")
+        else:
+            sites = ", ".join(PLATFORMS_BY_KEY[k].name for k in enabled)
+            await update.message.reply_text(f"Send me a video link from {sites}.")
         return
     if settings.get("PAUSED") and not is_admin(update):
         await update.message.reply_text("The bot is paused right now. Try again later.")
         return
 
-    for url in dict.fromkeys(urls):  # dedupe, keep order
-        await start_job(update, url)
+    for url, site in videos:
+        await start_job(update, url, site)
 
 
 # ---------- reel jobs: prepare in the background while the user picks sections ----------
@@ -367,6 +411,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 class ReelJob:
     id: str
     url: str
+    platform: Platform
     user_id: int
     chat_id: int
     reply_to: int
@@ -444,7 +489,10 @@ def picker_text(job: ReelJob) -> str:
         ticked = f"Pre-ticked from {job.preselected_from} ({len(picked)}): {names}\nTap 🧹 Untick all to start fresh."
     else:
         ticked = f"Ticked ({len(picked)}): " + ", ".join(s.label for s in picked)
-    return f"What do you want from this reel? Tick any, then tap Explain.\n\n{ticked}\n\n{status}"
+    return (
+        f"{job.platform.name} video. What do you want from it? Tick any, then tap Explain."
+        f"\n\n{ticked}\n\n{status}"
+    )
 
 
 def picker_keyboard(job: ReelJob) -> InlineKeyboardMarkup:
@@ -491,10 +539,11 @@ async def _safe_edit(msg, text: str | None = None, markup=None) -> None:
             log.debug("Edit failed: %s", e)
 
 
-async def start_job(update: Update, url: str) -> None:
+async def start_job(update: Update, url: str, platform: Platform) -> None:
     job = ReelJob(
         id=secrets.token_hex(4),
         url=url,
+        platform=platform,
         user_id=update.effective_user.id,
         chat_id=update.effective_chat.id,
         reply_to=update.message.message_id,
@@ -507,27 +556,40 @@ async def start_job(update: Update, url: str) -> None:
 
 
 async def prepare_job(job: ReelJob) -> None:
-    """Download and upload to Gemini while the user is still choosing."""
+    """Get the video ready for Gemini while the user is still choosing."""
     try:
         async with job_slots():
-            job.workdir = Path(tempfile.mkdtemp(prefix="reel_"))
-            video, job.info = await asyncio.to_thread(download_reel, job.url, job.workdir)
-            job.stage = "Sending it to Gemini..."
-            if not job.requested:
-                await _safe_edit(job.picker_msg, picker_text(job), picker_keyboard(job))
-            job.uploaded = await asyncio.to_thread(upload_video, video)
-            shutil.rmtree(job.workdir, ignore_errors=True)  # Gemini has it now
-            job.workdir = None
+            if job.platform.mode == "gemini_url":
+                # Gemini watches public YouTube videos itself, so nothing is downloaded. That also
+                # sidesteps YouTube blocking cloud-server IPs.
+                job.stage = "Looking up the video..."
+                job.info = await asyncio.to_thread(video_metadata, job.url)
+                _check_length(job.info)
+                job.uploaded = types.Part(file_data=types.FileData(file_uri=canonical_youtube(job.url)))
+            else:
+                job.workdir = Path(tempfile.mkdtemp(prefix="reel_"))
+                video, job.info = await asyncio.to_thread(download_reel, job.url, job.workdir)
+                job.stage = "Sending it to Gemini..."
+                if not job.requested:
+                    await _safe_edit(job.picker_msg, picker_text(job), picker_keyboard(job))
+                job.uploaded = await asyncio.to_thread(upload_video, video)
+                shutil.rmtree(job.workdir, ignore_errors=True)  # Gemini has it now
+                job.workdir = None
+            job.info["_platform"] = job.platform.name
+    except VideoTooLong as e:
+        job.error = str(e)
     except yt_dlp.utils.DownloadError as e:
         log.warning("Download failed for %s: %s", job.url, e)
-        hint = "" if cookies_file() else " Instagram often needs a logged-in session; an admin can send cookies.txt."
-        job.error = f"Couldn't download that reel.{hint}"
+        hint = "" if cookies_file() else (
+            f" {job.platform.name} often needs a logged-in session; an admin can send cookies.txt."
+        )
+        job.error = f"Couldn't download that video. It may be private or deleted.{hint}"
     except genai_errors.APIError as e:
         log.warning("Gemini upload failed: %s", e)
         job.error = _gemini_error_text(e)
     except Exception:
         log.exception("Preparing %s failed", job.url)
-        job.error = "Something went wrong while preparing that reel."
+        job.error = "Something went wrong while preparing that video."
     finally:
         job.ready.set()
     if job.error:
@@ -870,9 +932,10 @@ async def cmd_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         age = _duration(time.time() - Path(path).stat().st_mtime)
         msg = f"Cookies file {path} is present, last replaced {age} ago."
     else:
-        msg = "No cookies file. Instagram downloads will often fail."
+        msg = "No cookies file. Instagram and Facebook downloads will often fail."
     await update.message.reply_text(
-        msg + "\n\nTo replace it, send me the exported file named cookies.txt as a document."
+        msg + "\n\nSend me an exported cookies.txt as a document to add or update logins. "
+        "Cookies for a site replace that site's old ones; other sites are kept."
     )
 
 
@@ -887,14 +950,15 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     data = bytes(await (await doc.get_file()).download_as_bytearray())
     text = data.decode("utf-8", errors="replace")
-    if "instagram.com" not in text or "\t" not in text:
-        await update.message.reply_text(
-            "That doesn't look like a Netscape cookies.txt with instagram.com cookies. Not saved."
-        )
-        return
     target = BASE_DIR / (settings.get("INSTAGRAM_COOKIES_FILE").strip() or "cookies.txt")
+    old = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
+    try:
+        merged, sites = merge_cookies(old, text, [p.cookie_domain for p in PLATFORMS])
+    except ValueError as e:
+        await update.message.reply_text(f"Not saved: {e}")
+        return
     tmp = target.with_suffix(".tmp")
-    tmp.write_bytes(data)
+    tmp.write_text(merged, encoding="utf-8")
     try:
         os.chmod(tmp, 0o600)
     except OSError:
@@ -905,7 +969,9 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except TelegramError:
         pass
     log.info("Admin %s replaced the cookies file", update.effective_user.id)
-    await update.effective_chat.send_message("Cookies saved and your message deleted. Used from the next reel.")
+    await update.effective_chat.send_message(
+        f"Cookies saved for {', '.join(sites)} and your message deleted. Used from the next video."
+    )
 
 
 @admin_only
