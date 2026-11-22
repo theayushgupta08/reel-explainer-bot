@@ -368,6 +368,7 @@ class ReelJob:
     chat_id: int
     reply_to: int
     selected: list[str]
+    preselected_from: str = ""  # "your last reel" or "the defaults" until the user changes anything
     stage: str = "Downloading the reel..."
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     error: str | None = None
@@ -409,9 +410,12 @@ def _load_prefs() -> dict[str, list[str]]:
         return {}
 
 
-def user_sections(user_id: int) -> list[str]:
+def user_sections(user_id: int) -> tuple[list[str], str]:
+    """Starting ticks for a user's checklist and where they came from."""
     saved = [k for k in _load_prefs().get(str(user_id), []) if k in BY_KEY]
-    return saved or list(settings.get("DEFAULT_SECTIONS"))
+    if saved:
+        return saved, "your last reel"
+    return list(settings.get("DEFAULT_SECTIONS")), "the defaults"
 
 
 def save_user_sections(user_id: int, keys: list[str]) -> None:
@@ -429,13 +433,21 @@ def picker_text(job: ReelJob) -> str:
         status = "✅ Reel is ready."
     else:
         status = f"⏳ {job.stage} You can pick while it loads."
-    return f"What do you want from this reel? Tick any, then tap Explain.\n\n{status}"
+    picked = ordered(job.selected)
+    if not picked:
+        ticked = "Nothing ticked yet. Tap the options you want."
+    elif job.preselected_from:
+        names = ", ".join(s.label for s in picked)
+        ticked = f"Pre-ticked from {job.preselected_from} ({len(picked)}): {names}\nTap 🧹 Untick all to start fresh."
+    else:
+        ticked = f"Ticked ({len(picked)}): " + ", ".join(s.label for s in picked)
+    return f"What do you want from this reel? Tick any, then tap Explain.\n\n{ticked}\n\n{status}"
 
 
 def picker_keyboard(job: ReelJob) -> InlineKeyboardMarkup:
     rows, row = [], []
     for s in SECTIONS:
-        mark = "☑️" if s.key in job.selected else "▫️"
+        mark = "✅" if s.key in job.selected else "⬜"
         row.append(InlineKeyboardButton(f"{mark} {s.label}", callback_data=f"t|{job.id}|{s.key}"))
         if len(row) == 2:
             rows.append(row)
@@ -444,7 +456,7 @@ def picker_keyboard(job: ReelJob) -> InlineKeyboardMarkup:
         rows.append(row)
     rows.append([
         InlineKeyboardButton("Select all", callback_data=f"all|{job.id}"),
-        InlineKeyboardButton("Clear", callback_data=f"none|{job.id}"),
+        InlineKeyboardButton("🧹 Untick all", callback_data=f"none|{job.id}"),
         InlineKeyboardButton("✖ Cancel", callback_data=f"x|{job.id}"),
     ])
     rows.append([InlineKeyboardButton(f"▶️ Explain ({len(job.selected)})", callback_data=f"go|{job.id}")])
@@ -483,8 +495,9 @@ async def start_job(update: Update, url: str) -> None:
         user_id=update.effective_user.id,
         chat_id=update.effective_chat.id,
         reply_to=update.message.message_id,
-        selected=user_sections(update.effective_user.id),
+        selected=[],
     )
+    job.selected, job.preselected_from = user_sections(update.effective_user.id)
     jobs[job.id] = job
     job.picker_msg = await update.message.reply_text(picker_text(job), reply_markup=picker_keyboard(job))
     asyncio.create_task(prepare_job(job))
@@ -626,8 +639,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             job.selected = [s.key for s in SECTIONS]
         elif action == "none":
             job.selected = []
+        job.preselected_from = ""  # it's the user's own selection now
         await q.answer()
-        await _safe_edit(q.message, None, picker_keyboard(job))
+        await _safe_edit(q.message, picker_text(job), picker_keyboard(job))
     elif action == "go":
         if job.requested:
             await q.answer()

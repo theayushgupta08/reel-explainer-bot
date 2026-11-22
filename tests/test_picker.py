@@ -92,7 +92,9 @@ def test_full_flow(tmp_path, monkeypatch):
             await bot.on_button(SimpleNamespace(callback_query=q), ctx)
             return q
 
+        assert "Pre-ticked from the defaults (5)" in picker.text
         await press(f"none|{job.id}")
+        assert "Nothing ticked yet" in picker.text
         q = await press(f"go|{job.id}")
         assert q.answers == ["Pick at least one option."]
         await press(f"t|{job.id}|recreate")
@@ -102,7 +104,7 @@ def test_full_flow(tmp_path, monkeypatch):
         await press(f"go|{job.id}")
         assert asked[-1] == ["summary", "recreate"]
         assert any("answer ['summary', 'recreate']" in m.text for m in sent)
-        assert bot.user_sections(7) == ["summary", "recreate"]  # remembered for next time
+        assert bot.user_sections(7) == (["summary", "recreate"], "your last reel")  # remembered for next time
 
         more = job.more_msg
         labels = [b.callback_data for row in more.reply_markup.inline_keyboard for b in row]
