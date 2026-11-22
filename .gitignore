@@ -11,3 +11,5 @@ bot.lock
 settings.json
 *.tmp
 prefs.json
+data/
+LAUNCH_POSTS.md

@@ -1,97 +1,153 @@
 # Reel Explainer Bot
 
-A private Telegram bot. Share an Instagram reel to it and it replies with the reel's full context: summary, what's said, what's shown on screen, tools and links mentioned, steps, and a fact check. Gemini (free tier) watches the video and listens to the audio directly.
+**Share an Instagram reel to Telegram. Get back exactly what you wanted from it: the summary, the tools it mentioned, the steps, a fact check, or how to make one like it with AI.**
 
-## Setup (Windows, one time)
+A self-hosted Telegram bot. Gemini watches the whole video and listens to the audio, so it catches what's on screen and what's said, not just the caption. It runs free on Gemini's free tier and a free server.
 
-1. **Telegram bot token.** In Telegram, open @BotFather, send `/newbot`, and copy the token.
-2. **Gemini API key.** Go to https://aistudio.google.com/apikey and create a key. No card is needed.
-3. **Create `.env`.** Copy `.env.example` to `.env` and paste in both values. Leave `ALLOWED_USER_IDS` empty for now.
-4. **Run the bot.** Double-click `run.bat`. The first run creates `.venv` and installs the packages.
-5. **Lock the bot to yourself.** Message your bot `/start`. It replies with your user ID. Put that number in `ALLOWED_USER_IDS` in `.env`, close the window, and run `run.bat` again.
+[![CI](https://github.com/theayushgupta08/reel-explainer-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/theayushgupta08/reel-explainer-bot/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 
-## Auto-start with Windows
+## Why
 
-The shortcut `Reel Explainer Bot` in your Windows Startup folder runs `start-hidden.vbs` each time you log in. It updates `yt-dlp` and then starts the bot in the background with no window.
+You save a reel because it mentions a tool, a recipe, a workflow or a claim. A week later you can't remember what it said, and rewatching it three times to catch a URL is painful. This bot turns a reel into text you can read in ten seconds and search later.
 
-- **Stop it:** double-click `stop-bot.bat`.
-- **Start it again without rebooting:** double-click `start-hidden.vbs`.
-- **See what it's doing:** open `bot.log` in this folder.
-- **Turn off auto-start:** press Win+R, type `shell:startup`, and delete `Reel Explainer Bot`.
-- Only one copy of the bot can run at a time. If the hidden one is running, `run.bat` exits with "already running". To watch the bot live in a window, run `stop-bot.bat` first, then `run.bat`.
+## What you can ask for
 
-## Instagram cookies (usually needed)
+Send a link and tick any mix of these, then tap **Explain**:
 
-Instagram blocks most logged-out downloads. To give the bot a session:
+| | |
+|---|---|
+| 📝 **Summary**: the point in 2-3 sentences | 💡 **Key takeaways**: 3-7 action items |
+| 🗣 **What's said**: speech, with exact numbers and names | 📜 **Full transcript** with timestamps, translated if needed |
+| 👀 **What's shown**: on-screen text, slides, code | 🔗 **Tools & links**: every app, site or person, with free/paid notes |
+| 🪜 **Steps**: the how-to, numbered | ✅ **Fact check**: misleading or outdated claims flagged |
+| 🎬 **Make one with AI**: free and paid workflows to recreate the format | 📈 **Why it works**: hook, pacing, editing, what to copy |
+| 🎵 **Music & audio**: the track, voice and effects | ✍️ **Content ideas**: 5 original reel ideas inspired by it |
 
-1. Log in to Instagram in your browser, ideally with a **spare account**, because Instagram can flag scraping accounts.
-2. Install a "Get cookies.txt LOCALLY" type extension and export the cookies for `instagram.com` as `cookies.txt`.
-3. Save it in this folder and set `INSTAGRAM_COOKIES_FILE=cookies.txt` in `.env`.
+- The bot starts downloading as soon as you send the link, so the answer is quick once you've picked.
+- All the sections you tick are answered in **one** Gemini request.
+- Afterwards, "Want more from this reel?" buttons fetch any other section without downloading again.
+- Your last selection is remembered for the next reel.
 
-`cookies.txt` is a login secret. It is already listed in `.gitignore`. Never share it.
+## Features
 
-## Usage
+- **Watches the actual video**: picture and audio, not just the caption.
+- **Private by default**: only Telegram user IDs you allow can use it.
+- **Run it entirely from Telegram**: change models, limits and the prompt, manage users, replace Instagram cookies, read logs, pause, restart, or pull the latest code with `/update`.
+- **Built for free tiers**: retries and falls back to a lighter Gemini model when the main one is busy, and limits parallel jobs so a 1 GB VM is enough.
+- **Leaves nothing behind**: videos are deleted from the server right after upload and from Gemini when the follow-up window ends.
+- **Production-ready deploy**: hardened systemd unit, Docker image, tests and CI.
 
-In the Instagram app, tap **Share → Telegram → your bot**, or paste a link such as `https://www.instagram.com/reel/...`. Messages containing several links are processed one by one.
+## Quick start
 
-## Notes
+You need Python 3.11+ and ffmpeg (or Docker), plus:
 
-- **Free-tier limits:** Google sets per-minute and per-day request caps. If you hit one, the bot tells you to retry. Your current limits are shown in AI Studio.
-- **Privacy:** on the free tier, Google may use uploads to improve its models. Only send public content.
-- **Model:** `GEMINI_MODEL` defaults to `gemini-3.5-flash`. When it's overloaded, the bot retries and then falls back to the models in `GEMINI_FALLBACK_MODELS` (default `gemini-3.5-flash-lite`).
-- **The bot only runs while this PC is on and you're logged in.** Both launchers update `yt-dlp` on every start, because Instagram changes often break older versions.
-- Downloading reels is against Instagram's terms. Keep it personal and low-volume.
+1. **A Telegram bot token**: message [@BotFather](https://t.me/BotFather), send `/newbot`, copy the token.
+2. **A Gemini API key**: free from [Google AI Studio](https://aistudio.google.com/apikey).
+3. **Your Telegram user ID**: start the bot once and send `/start`; it tells you.
 
-## Choosing what you get
+```bash
+git clone https://github.com/theayushgupta08/reel-explainer-bot.git
+cd reel-explainer-bot
+cp .env.example .env        # fill in TELEGRAM_BOT_TOKEN and GEMINI_API_KEY
+python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python bot.py
+```
 
-When you send a reel link, the bot starts downloading it straight away and shows a checklist: Summary, Key takeaways, What's said, Full transcript, What's shown, Tools & links, Steps, Fact check, Make one with AI (free and paid workflows), Why it works, Music & audio, and Content ideas. Tick any combination and tap **Explain**. Your last choice is remembered for the next reel.
+Send your bot `/start`, put the ID it replies with into `ALLOWED_USER_IDS` in `.env`, and restart. Then share a reel to the bot: in Instagram tap **Share → Telegram → your bot**, or paste the link.
 
-After the answer, a "Want more from this reel?" menu lets you request any other section without re-downloading. It stays available for `JOB_TTL_MIN` minutes (default 30). Admins can change the starting ticks for new users with `/set DEFAULT_SECTIONS summary,tools,steps`.
+### Docker
+
+```bash
+cp .env.example .env        # fill it in
+mkdir data                  # put cookies.txt here (see below)
+sudo chown -R 1000:1000 data   # Linux only
+docker compose up -d --build
+```
+
+### Instagram cookies (usually needed)
+
+Instagram blocks most logged-out downloads, so give the bot a session:
+
+1. Log in to Instagram in your browser with a **spare account**. Instagram can flag accounts used for downloading.
+2. Export the `instagram.com` cookies as `cookies.txt` with a "Get cookies.txt LOCALLY"-style extension.
+3. Send the file to your bot in Telegram as an admin. It's validated, saved, and your message is deleted. Or place it next to `bot.py`.
+
+`cookies.txt` is a login secret. Never commit or share it.
 
 ## Control it from Telegram
 
-Admins (`ADMIN_USER_IDS`, or every allowed user if that is empty) get a command menu. Send `/help` for the full list:
+Admins are the users in `ADMIN_USER_IDS`, or every allowed user if that is empty. They get a command menu; `/help` lists everything:
 
-- `/status`, `/logs [N]`: health, version, memory, usage, recent log lines
-- `/config`, `/set KEY VALUE`, `/reset KEY`: change the model, fallbacks, timeouts, limits and log level. Changes are saved to `settings.json` and survive restarts. `/set GEMINI_API_KEY ...` deletes your message after saving.
-- `/prompt`, `/setprompt`, `/resetprompt`: view or replace the Gemini instructions
-- `/users`, `/allow ID`, `/deny ID`, `/admin ID`, `/unadmin ID`: manage access
-- `/pause`, `/resume`: stop or start accepting reels from non-admins
-- `/cookies`: check the cookies; send a file named `cookies.txt` to replace it (the message is deleted after saving)
-- `/update`: `git pull` the latest code from GitHub, install requirements and restart
-- `/restart`: restart (also updates yt-dlp)
+| Command | What it does |
+|---|---|
+| `/status`, `/logs [N]` | Health, version, memory, usage, recent log lines |
+| `/config`, `/set KEY VALUE`, `/reset KEY` | Model, fallbacks, timeouts, limits, log level, default sections. Saved and kept across restarts |
+| `/prompt`, `/setprompt`, `/resetprompt` | View or replace the instructions sent to Gemini |
+| `/users`, `/allow ID`, `/deny ID`, `/admin ID`, `/unadmin ID` | Manage access |
+| `/pause`, `/resume` | Stop or start accepting reels from non-admins |
+| `/cookies` | Cookie status. Send a `cookies.txt` file to replace it |
+| `/update`, `/restart` | Pull the latest code and restart; restart also updates yt-dlp |
 
-`TELEGRAM_BOT_TOKEN` can only be changed in `.env` on the server.
+`/set GEMINI_API_KEY …` deletes your message after saving. The Telegram token can only be changed in `.env`.
 
-## Server deployment (Oracle Cloud Always Free, Ubuntu)
+## Configuration
 
-The server runs a git checkout at `/opt/reel-bot`, owned by the `reelbot` service user, which pulls from GitHub with a read-only deploy key stored in `/etc/reel-bot/`.
+Everything in [`.env.example`](.env.example) can also be changed at runtime with `/set`, except the Telegram token.
 
-1. Create an Always Free VM (Ubuntu 24.04). No inbound ports are needed; the bot polls Telegram.
-2. Create a deploy key and add it to the repo as read-only (GitHub → Settings → Deploy keys):
-   ```bash
-   sudo mkdir -p /etc/reel-bot && sudo ssh-keygen -t ed25519 -N "" -f /etc/reel-bot/deploy_key
-   sudo cat /etc/reel-bot/deploy_key.pub
-   ```
-3. Clone and configure:
-   ```bash
-   sudo useradd --system --home /opt/reel-bot --shell /usr/sbin/nologin reelbot
-   ssh-keyscan github.com | sudo tee /etc/reel-bot/known_hosts
-   sudo chown -R reelbot:reelbot /etc/reel-bot && sudo chmod 600 /etc/reel-bot/deploy_key
-   SSHCMD="ssh -i /etc/reel-bot/deploy_key -o UserKnownHostsFile=/etc/reel-bot/known_hosts"
-   sudo GIT_SSH_COMMAND="$SSHCMD" git clone git@github.com:<you>/reel-explainer-bot.git /opt/reel-bot
-   sudo git -C /opt/reel-bot config core.sshCommand "$SSHCMD"
-   ```
-4. Copy `.env` and `cookies.txt` into `/opt/reel-bot/`, then run `sudo bash /opt/reel-bot/deploy/setup.sh`.
-5. Stop any other copy of the bot (for example the Windows one). Two copies polling the same token cause 409 Conflict errors.
+| Setting | Default | Notes |
+|---|---|---|
+| `GEMINI_MODEL` | `gemini-3.5-flash` | Main model |
+| `GEMINI_FALLBACK_MODELS` | `gemini-3.5-flash-lite` | Tried when the main one is overloaded or rate-limited |
+| `ALLOWED_USER_IDS` / `ADMIN_USER_IDS` | empty | Comma-separated Telegram user IDs |
+| `DEFAULT_SECTIONS` | `summary,takeaways,tools,steps,factcheck` | Pre-ticked for a user's first reel |
+| `MAX_CONCURRENT_JOBS` | `2` | Reels processed at once |
+| `MAX_VIDEO_MB` | `200` | Larger videos are refused |
+| `JOB_TTL_MIN` | `30` | How long follow-up buttons keep working |
+| `DATA_DIR` | project folder | Where `settings.json` and `prefs.json` are written |
 
-- **Logs:** `/logs` in Telegram, or `journalctl -u reel-bot -f`
-- **Deploy new code:** push to GitHub, then send `/update`
+## Deploy free on Oracle Cloud
 
-## Development
+An Always Free Ubuntu VM is enough; even the 1 GB E2.1.Micro works. No inbound ports are needed, because the bot polls Telegram.
 
 ```bash
-pip install -r requirements-dev.txt
-ruff check . && pytest -q
+sudo useradd --system --home /opt/reel-bot --shell /usr/sbin/nologin reelbot
+sudo git clone https://github.com/theayushgupta08/reel-explainer-bot.git /opt/reel-bot
+# copy your .env (and cookies.txt) into /opt/reel-bot/
+sudo bash /opt/reel-bot/deploy/setup.sh
 ```
-CI runs the same checks on every push.
+
+`setup.sh` installs Python and ffmpeg, adds 2 GB of swap, and installs a locked-down systemd service that restarts on failure. Logs: `/logs` in Telegram or `journalctl -u reel-bot -f`. To ship new code, push to your fork and send `/update`.
+
+Only one copy of a bot token can run at a time. A second copy causes 409 Conflict errors.
+
+### Running on Windows
+
+The [`windows/`](windows) folder has `run.bat` (run in a window), `start-hidden.vbs` (run in the background, for example from the Startup folder) and `stop-bot.bat`.
+
+## How it works
+
+```
+Telegram link ─▶ yt-dlp downloads the reel ─▶ upload to Gemini Files API
+                                              │
+user ticks sections ──────────────────────────┴─▶ one generate_content call ─▶ reply
+                                                         │
+                         "more" buttons reuse the upload ┘   deleted after JOB_TTL_MIN
+```
+
+## Good to know
+
+- **Instagram's terms** don't allow automated downloading. This project is for personal, low-volume use of public content. You're responsible for how you use it.
+- **Free-tier privacy:** on Gemini's free tier, Google may use inputs to improve its models. Only send public content.
+- **Free-tier limits** are per model and change over time. See yours in AI Studio. Each Explain tap uses one request.
+- AI answers can be wrong. Treat fact checks and tool prices as a starting point.
+
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Adding a new checklist section is a single entry in [`sections.py`](sections.py). Security issues: [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE)

@@ -1,0 +1,27 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what the bot did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Output of /logs 50 or journalctl. Remove tokens, keys and cookies first.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The commit shown by /status, or "latest main".
+  - type: dropdown
+    id: host
+    attributes:
+      label: Where does it run?
+      options: [Linux server (systemd), Docker, Windows, macOS, Other]

@@ -57,7 +57,10 @@ BASE_DIR = Path(__file__).resolve().parent
 os.chdir(BASE_DIR)  # so .env and cookies.txt resolve however the bot is launched
 load_dotenv(BASE_DIR / ".env")
 
-settings = Settings(BASE_DIR / "settings.json")
+# DATA_DIR holds files the bot writes at runtime (settings.json, prefs.json). Docker mounts it as a volume.
+DATA_DIR = Path(os.getenv("DATA_DIR", "").strip() or BASE_DIR)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+settings = Settings(DATA_DIR / "settings.json")
 
 # ---------- logging ----------
 
@@ -400,7 +403,7 @@ def job_slots() -> asyncio.Semaphore:
 
 
 # Remembered picks per user, so the next reel starts with the same boxes ticked.
-_PREFS_PATH = BASE_DIR / "prefs.json"
+_PREFS_PATH = DATA_DIR / "prefs.json"
 
 
 def _load_prefs() -> dict[str, list[str]]:

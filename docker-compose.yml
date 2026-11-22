@@ -1,0 +1,12 @@
+services:
+  reel-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      INSTAGRAM_COOKIES_FILE: /data/cookies.txt
+    volumes:
+      # Put cookies.txt in ./data. The bot keeps settings.json and prefs.json there too.
+      # On Linux, make it writable by the container user first: sudo chown -R 1000:1000 data
+      - ./data:/data
