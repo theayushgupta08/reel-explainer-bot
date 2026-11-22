@@ -182,3 +182,61 @@ def test_too_long_youtube_is_refused(tmp_path, monkeypatch):
         assert not any(j.user_id == 9 for j in bot.jobs.values())
 
     asyncio.run(scenario())
+
+
+def test_504_goes_straight_to_fallback(monkeypatch):
+    from google.genai import errors
+
+    calls = []
+
+    class Models:
+        def generate_content(self, model, contents, config):
+            calls.append(model)
+            if model == "main":
+                raise errors.APIError(504, {"error": {"code": 504, "message": "deadline", "status": "X"}})
+            return SimpleNamespace(text="ok")
+
+    monkeypatch.setattr(bot, "gemini", lambda: SimpleNamespace(models=Models()))
+    real_get = bot.settings.get
+    overrides = {"GEMINI_MODEL": "main", "GEMINI_FALLBACK_MODELS": ["lite"]}
+    monkeypatch.setattr(bot.settings, "get", lambda k: overrides.get(k, real_get(k)))
+    assert bot._generate_with_fallback(["x"]).text == "ok"
+    assert calls == ["main", "lite"]  # no retries on the timed-out model
+
+
+def test_failed_answer_offers_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "_PREFS_PATH", tmp_path / "prefs.json")
+    monkeypatch.setattr(bot, "is_allowed", lambda u: True)
+    monkeypatch.setattr(bot, "download_reel", lambda url, wd: (wd / "v.mp4", {}))
+    monkeypatch.setattr(bot, "upload_video", lambda v: "file")
+    monkeypatch.setattr(bot, "delete_uploaded", lambda f: None)
+    attempts = []
+
+    def flaky(uploaded, info, keys):
+        attempts.append(keys)
+        if len(attempts) == 1:
+            raise RuntimeError("boom")
+        return "second time lucky"
+
+    monkeypatch.setattr(bot, "explain_sections", flaky)
+
+    async def scenario():
+        sent = []
+        msg = FakeMsg(sent, "https://fb.watch/aBcDeF/")
+        u = SimpleNamespace(id=10)
+        update = SimpleNamespace(effective_user=u, effective_chat=u, message=msg)
+        ctx = SimpleNamespace(bot=FakeBot(sent), args=[])
+        await bot.handle_message(update, ctx)
+        job = next(j for j in bot.jobs.values() if j.user_id == 10)
+        assert "Facebook video" in job.picker_msg.text
+        await job.ready.wait()
+        await bot.on_button(SimpleNamespace(callback_query=FakeQuery(f"go|{job.id}", 10, job.picker_msg)), ctx)
+        failed = next(m for m in sent if "⚠️" in m.text)
+        button = failed.reply_markup.inline_keyboard[0][0]
+        assert button.callback_data == f"r|{job.id}"
+        await bot.on_button(SimpleNamespace(callback_query=FakeQuery(button.callback_data, 10, failed)), ctx)
+        assert attempts[0] == attempts[1]
+        assert any("second time lucky" in m.text for m in sent)
+        await bot.expire_job(job, delay=0)
+
+    asyncio.run(scenario())

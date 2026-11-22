@@ -211,7 +211,9 @@ def download_reel(url: str, workdir: Path) -> tuple[Path, dict]:
 
 # ---------- gemini ----------
 
-RETRYABLE_CODES = {429, 500, 503}
+RETRYABLE_CODES = {429, 500, 502, 503}
+# The model ran out of time on Gemini's side. Retrying the same model rarely helps; try the next one.
+NEXT_MODEL_CODES = {504}
 
 
 def _generate_with_fallback(contents):
@@ -229,10 +231,15 @@ def _generate_with_fallback(contents):
                     log.info("Answered by fallback model %s", model)
                 return response
             except genai_errors.APIError as e:
-                if getattr(e, "code", None) not in RETRYABLE_CODES:
+                code = getattr(e, "code", None)
+                if code in NEXT_MODEL_CODES:
+                    last_error = e
+                    log.warning("%s ran out of time (%s); trying the next model", model, code)
+                    break
+                if code not in RETRYABLE_CODES:
                     raise
                 last_error = e
-                log.warning("%s busy (%s), attempt %d", model, e.code, attempt + 1)
+                log.warning("%s busy (%s), attempt %d", model, code, attempt + 1)
             except Exception as e:
                 if "timeout" not in type(e).__name__.lower():
                     raise
@@ -449,6 +456,7 @@ class ReelJob:
     requested: bool = False
     generating: int = 0
     done: set[str] = field(default_factory=set)
+    retry_keys: list[str] = field(default_factory=list)
 
 
 jobs: dict[str, ReelJob] = {}
@@ -572,6 +580,7 @@ async def start_job(update: Update, url: str, platform: Platform) -> None:
     )
     job.selected, job.preselected_from = user_sections(update.effective_user.id)
     jobs[job.id] = job
+    log.info("Job %s: %s %s from user %s", job.id, platform.name, url, job.user_id)
     job.picker_msg = await update.message.reply_text(picker_text(job), reply_markup=picker_keyboard(job))
     asyncio.create_task(prepare_job(job))
 
@@ -646,8 +655,10 @@ def _gemini_error_text(e: genai_errors.APIError) -> str:
     code = getattr(e, "code", None)
     if code == 429:
         return "Hit the Gemini free-tier rate limit. Try again in a minute."
-    if code in (500, 503):
+    if code in (500, 502, 503):
         return "Gemini's free models are overloaded right now. Try again in a few minutes."
+    if code == 504:
+        return "Gemini took too long on this video (it's busy right now). Tap the option again in a few minutes."
     return f"Gemini rejected the request (error {code})."
 
 
@@ -671,15 +682,18 @@ async def run_sections(job: ReelJob, keys: list[str], bot) -> None:
         async with job_slots():
             await bot.send_chat_action(job.chat_id, ChatAction.TYPING)
             answer = await asyncio.to_thread(explain_sections, job.uploaded, job.info, keys)
-    except genai_errors.APIError as e:
-        log.warning("Gemini API error: %s", e)
+    except Exception as e:
+        if isinstance(e, genai_errors.APIError):
+            log.warning("Gemini API error for %s: %s", job.url, e)
+            text = _gemini_error_text(e)
+        else:
+            log.exception("Gemini failed for %s", job.url)
+            text = "Gemini failed to explain this video."
         _stats["failed"] += 1
-        await _safe_edit(status, _gemini_error_text(e))
-        return
-    except Exception:
-        log.exception("Gemini failed for %s", job.url)
-        _stats["failed"] += 1
-        await _safe_edit(status, "Gemini failed to explain this reel. Try again later.")
+        # Keep the video ready and offer a one-tap retry instead of making the user resend the link.
+        job.retry_keys = keys
+        retry = InlineKeyboardMarkup([[InlineKeyboardButton("🔁 Try again", callback_data=f"r|{job.id}")]])
+        await _safe_edit(status, f"⚠️ {text}", retry if job.id in jobs else None)
         return
     finally:
         job.generating -= 1
@@ -747,6 +761,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         await q.answer()
         await run_sections(job, [parts[2]], context.bot)
+    elif action == "r":
+        keys = [k for k in job.retry_keys if k not in job.done]
+        if not keys:
+            await q.answer("Nothing to retry.")
+            return
+        await q.answer("Trying again")
+        job.retry_keys = []
+        await _safe_edit(q.message, "🔁 Retrying...", None)
+        await run_sections(job, keys, context.bot)
     elif action == "x":
         await q.answer("Cancelled")
         job.requested = True
