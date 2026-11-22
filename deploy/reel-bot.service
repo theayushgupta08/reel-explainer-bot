@@ -1,0 +1,25 @@
+[Unit]
+Description=Reel Explainer Telegram bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=reelbot
+Group=reelbot
+WorkingDirectory=/opt/reel-bot
+Environment=LOG_FILE=
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/opt/reel-bot/.venv/bin/pip install -U --quiet yt-dlp
+ExecStart=/opt/reel-bot/.venv/bin/python bot.py
+Restart=always
+RestartSec=10
+MemoryMax=700M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/reel-bot
+
+[Install]
+WantedBy=multi-user.target

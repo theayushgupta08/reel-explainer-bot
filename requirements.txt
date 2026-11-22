@@ -1,0 +1,5 @@
+python-telegram-bot>=22.0,<23
+google-genai>=1.0,<2
+python-dotenv>=1.0,<2
+# Left unpinned on purpose: Instagram changes often and only the newest yt-dlp keeps working.
+yt-dlp

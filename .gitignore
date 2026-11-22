@@ -1,0 +1,10 @@
+.env
+cookies.txt
+*.cookies.txt
+.venv/
+__pycache__/
+bot.log*
+bot.lock
+*.pyc
+.pytest_cache/
+.ruff_cache/
