@@ -10,17 +10,17 @@ A self-hosted Telegram bot. Gemini watches the whole video and listens to the au
 
 ## Why
 
-You save a reel because it mentions a tool, a recipe, a workflow or a claim. A week later you can't remember what it said, and rewatching it three times to catch a URL is painful. This bot turns a reel into text you can read in ten seconds and search later.
+You save a reel, Short or video because it mentions a tool, a recipe, a workflow or a claim. A week later you can't remember what it said, and rewatching it three times to catch a URL is painful. This bot turns the video into text you can read in ten seconds and search later.
 
 ## Supported links
 
 | Site | Links | How |
 |---|---|---|
-| Instagram | reels, posts, IGTV | Downloaded with yt-dlp, then uploaded to Gemini |
+| Instagram | reels, video posts, IGTV | Downloaded with yt-dlp, then uploaded to Gemini |
 | YouTube | videos, Shorts, `youtu.be` links, live replays | Gemini watches the public URL itself; nothing is downloaded |
 | Facebook | reels, videos, `fb.watch` and share links | Downloaded with yt-dlp, then uploaded to Gemini |
 
-Videos longer than `MAX_VIDEO_MIN` (default 20 minutes) are refused so one long video can't use up your free tier. Admins can switch sites off with `/set ENABLED_PLATFORMS instagram,youtube`. YouTube only works for public and unlisted videos, not private or age-restricted ones.
+Videos longer than `MAX_VIDEO_MIN` (default 20 minutes) are refused, so one long video can't use up your free tier. When YouTube hides a video's length from your server, Gemini watches only the first `MAX_VIDEO_MIN` minutes. Admins can switch sites off with `/set ENABLED_PLATFORMS instagram,youtube`. YouTube only works for public and unlisted videos, not private or age-restricted ones.
 
 ## What you can ask for
 
@@ -33,19 +33,22 @@ Send a link and tick any mix of these, then tap **Explain**:
 | 👀 **What's shown**: on-screen text, slides, code | 🔗 **Tools & links**: every app, site or person, with free/paid notes |
 | 🪜 **Steps**: the how-to, numbered | ✅ **Fact check**: misleading or outdated claims flagged |
 | 🎬 **Make one with AI**: free and paid workflows to recreate the format | 📈 **Why it works**: hook, pacing, editing, what to copy |
-| 🎵 **Music & audio**: the track, voice and effects | ✍️ **Content ideas**: 5 original reel ideas inspired by it |
+| 🎵 **Music & audio**: the track, voice and effects | ✍️ **Content ideas**: 5 original video ideas inspired by it |
 
-- The bot starts downloading as soon as you send the link, so the answer is quick once you've picked.
+- The bot starts preparing the video as soon as you send the link, so the answer is quick once you've picked.
 - All the sections you tick are answered in **one** Gemini request.
 - Afterwards, "Want more from this reel?" buttons fetch any other section without downloading again.
-- Your last selection is remembered for the next reel.
+- If Gemini is busy and an answer fails, a **🔁 Try again** button reruns it on the same video.
+- Your last selection is remembered for the next video.
 
 ## Features
 
 - **Watches the actual video**: picture and audio, not just the caption.
 - **Private by default**: only Telegram user IDs you allow can use it.
-- **Run it entirely from Telegram**: change models, limits and the prompt, manage users, replace Instagram cookies, read logs, pause, restart, or pull the latest code with `/update`.
-- **Built for free tiers**: retries and falls back to a lighter Gemini model when the main one is busy, and limits parallel jobs so a 1 GB VM is enough.
+- **Instagram, YouTube and Facebook**: share from any of them, or paste a link. Several links in one message are handled one by one.
+- **Run it entirely from Telegram**: change models, limits and the prompt, switch sites on or off, manage users, update cookies, read logs, pause, restart, or pull the latest code with `/update`.
+- **Built for free tiers**: one Gemini request per answer, a length limit, automatic retries with fallback to a lighter model when the main one is busy or times out, and capped parallel jobs so a 1 GB VM is enough.
+- **Works from cloud servers**: YouTube is watched by Gemini directly, so YouTube's blocking of cloud IPs doesn't matter.
 - **Leaves nothing behind**: videos are deleted from the server right after upload and from Gemini when the follow-up window ends.
 - **Production-ready deploy**: hardened systemd unit, Docker image, tests and CI.
 
@@ -66,7 +69,7 @@ pip install -r requirements.txt
 python bot.py
 ```
 
-Send your bot `/start`, put the ID it replies with into `ALLOWED_USER_IDS` in `.env`, and restart. Then share a reel to the bot: in Instagram tap **Share → Telegram → your bot**, or paste the link.
+Send your bot `/start`, put the ID it replies with into `ALLOWED_USER_IDS` in `.env`, and restart. Then share a video to the bot: in Instagram, YouTube or Facebook tap **Share → Telegram → your bot**, or paste the link.
 
 ### Docker
 
@@ -94,11 +97,11 @@ Admins are the users in `ADMIN_USER_IDS`, or every allowed user if that is empty
 | Command | What it does |
 |---|---|
 | `/status`, `/logs [N]` | Health, version, memory, usage, recent log lines |
-| `/config`, `/set KEY VALUE`, `/reset KEY` | Model, fallbacks, timeouts, limits, log level, default sections. Saved and kept across restarts |
+| `/config`, `/set KEY VALUE`, `/reset KEY` | Model, fallbacks, timeouts, limits, enabled sites, log level, default sections. Saved and kept across restarts |
 | `/prompt`, `/setprompt`, `/resetprompt` | View or replace the instructions sent to Gemini |
 | `/users`, `/allow ID`, `/deny ID`, `/admin ID`, `/unadmin ID` | Manage access |
-| `/pause`, `/resume` | Stop or start accepting reels from non-admins |
-| `/cookies` | Cookie status. Send a `cookies.txt` file to replace it |
+| `/pause`, `/resume` | Stop or start accepting videos from non-admins |
+| `/cookies` | Cookie status. Send a `cookies.txt` file to add or update a site's login |
 | `/update`, `/restart` | Pull the latest code and restart; restart also updates yt-dlp |
 
 `/set GEMINI_API_KEY …` deletes your message after saving. The Telegram token can only be changed in `.env`.
@@ -112,8 +115,8 @@ Everything in [`.env.example`](.env.example) can also be changed at runtime with
 | `GEMINI_MODEL` | `gemini-3.5-flash` | Main model |
 | `GEMINI_FALLBACK_MODELS` | `gemini-3.5-flash-lite` | Tried when the main one is overloaded or rate-limited |
 | `ALLOWED_USER_IDS` / `ADMIN_USER_IDS` | empty | Comma-separated Telegram user IDs |
-| `DEFAULT_SECTIONS` | `summary,takeaways,tools,steps,factcheck` | Pre-ticked for a user's first reel |
-| `MAX_CONCURRENT_JOBS` | `2` | Reels processed at once |
+| `DEFAULT_SECTIONS` | `summary,takeaways,tools,steps,factcheck` | Pre-ticked for a user's first video |
+| `MAX_CONCURRENT_JOBS` | `2` | Videos processed at once |
 | `ENABLED_PLATFORMS` | `instagram,youtube,facebook` | Sites whose links are accepted |
 | `MAX_VIDEO_MIN` | `20` | Longer videos are refused |
 | `MAX_VIDEO_MB` | `200` | Larger downloads are refused |
@@ -142,12 +145,15 @@ The [`windows/`](windows) folder has `run.bat` (run in a window), `start-hidden.
 ## How it works
 
 ```
-Telegram link ─▶ yt-dlp downloads the reel ─▶ upload to Gemini Files API
-                                              │
-user ticks sections ──────────────────────────┴─▶ one generate_content call ─▶ reply
-                                                         │
-                         "more" buttons reuse the upload ┘   deleted after JOB_TTL_MIN
+Instagram / Facebook link ─▶ yt-dlp downloads ─▶ upload to Gemini Files API ─┐
+YouTube link ─────────────▶ Gemini reads the public URL directly ────────────┤
+                                                                             │
+user ticks sections ─────────────────────────────────────────────────────────┴─▶ one generate_content call ─▶ reply
+                                                              │
+                  "more" and "Try again" buttons reuse the video   deleted after JOB_TTL_MIN
 ```
+
+The checklist appears immediately while the video is prepared in the background, so picking and loading happen at the same time. Gemini errors are retried, and a busy or timed-out model falls back to the next one in `GEMINI_FALLBACK_MODELS`.
 
 ## Good to know
 
