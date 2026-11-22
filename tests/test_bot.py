@@ -91,3 +91,11 @@ def test_split_respects_limit():
     chunks = bot._split(text, 1000)
     assert all(len(c) <= 1000 for c in chunks)
     assert "".join(chunks).replace("\n", "") == text.replace("\n", "")
+
+
+def test_youtube_part_caps_unknown_length(monkeypatch):
+    monkeypatch.setattr(bot.settings, "get", lambda k: 20 if k == "MAX_VIDEO_MIN" else None)
+    capped = bot.youtube_part("https://youtu.be/dQw4w9WgXcQ", {})
+    assert capped.video_metadata.end_offset == "1200s"
+    assert capped.file_data.file_uri == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    assert bot.youtube_part("https://youtu.be/dQw4w9WgXcQ", {"duration": 60}).video_metadata is None

@@ -21,6 +21,8 @@ import shutil
 import sys
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -164,8 +166,27 @@ def video_metadata(url: str) -> dict:
         with yt_dlp.YoutubeDL({**_ydl_base_opts(), "skip_download": True}) as ydl:
             return ydl.extract_info(url, download=False) or {}
     except Exception as e:
-        log.info("No metadata for %s (%s); continuing without it", url, str(e).splitlines()[0][:200])
-        return {}
+        log.info("No yt-dlp metadata for %s (%s)", url, str(e).splitlines()[0][:200])
+    if "youtu" in url:
+        # YouTube often bot-checks cloud servers, but its public oEmbed endpoint still answers.
+        # It has the title and channel, though not the length.
+        try:
+            query = urllib.parse.urlencode({"format": "json", "url": canonical_youtube(url)})
+            with urllib.request.urlopen(f"https://www.youtube.com/oembed?{query}", timeout=10) as r:
+                data = json.load(r)
+            return {"title": data.get("title"), "uploader": data.get("author_name")}
+        except Exception as e:
+            log.info("No oEmbed metadata for %s (%s)", url, e)
+    return {}
+
+
+def youtube_part(url: str, info: dict) -> types.Part:
+    """A reference Gemini watches directly. When the length is unknown, cap what Gemini watches
+    to MAX_VIDEO_MIN so a long video can't burn through the free tier."""
+    meta = None
+    if not info.get("duration"):
+        meta = types.VideoMetadata(end_offset=f"{settings.get('MAX_VIDEO_MIN') * 60}s")
+    return types.Part(file_data=types.FileData(file_uri=canonical_youtube(url)), video_metadata=meta)
 
 
 def download_reel(url: str, workdir: Path) -> tuple[Path, dict]:
@@ -565,7 +586,7 @@ async def prepare_job(job: ReelJob) -> None:
                 job.stage = "Looking up the video..."
                 job.info = await asyncio.to_thread(video_metadata, job.url)
                 _check_length(job.info)
-                job.uploaded = types.Part(file_data=types.FileData(file_uri=canonical_youtube(job.url)))
+                job.uploaded = youtube_part(job.url, job.info)
             else:
                 job.workdir = Path(tempfile.mkdtemp(prefix="reel_"))
                 video, job.info = await asyncio.to_thread(download_reel, job.url, job.workdir)
