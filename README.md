@@ -42,6 +42,12 @@ In the Instagram app, tap **Share → Telegram → your bot**, or paste a link s
 - **The bot only runs while this PC is on and you're logged in.** Both launchers update `yt-dlp` on every start, because Instagram changes often break older versions.
 - Downloading reels is against Instagram's terms. Keep it personal and low-volume.
 
+## Choosing what you get
+
+When you send a reel link, the bot starts downloading it straight away and shows a checklist: Summary, Key takeaways, What's said, Full transcript, What's shown, Tools & links, Steps, Fact check, Make one with AI (free and paid workflows), Why it works, Music & audio, and Content ideas. Tick any combination and tap **Explain**. Your last choice is remembered for the next reel.
+
+After the answer, a "Want more from this reel?" menu lets you request any other section without re-downloading. It stays available for `JOB_TTL_MIN` minutes (default 30). Admins can change the starting ticks for new users with `/set DEFAULT_SECTIONS summary,tools,steps`.
+
 ## Control it from Telegram
 
 Admins (`ADMIN_USER_IDS`, or every allowed user if that is empty) get a command menu. Send `/help` for the full list:

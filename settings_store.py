@@ -55,6 +55,16 @@ def _bool(value: Any) -> bool:
     raise ValueError("must be on or off")
 
 
+def _section_keys(value: Any) -> list[str]:
+    from sections import BY_KEY
+
+    keys = value if isinstance(value, list) else [k for k in re.split(r"[,\s]+", str(value or "")) if k]
+    bad = [k for k in keys if k not in BY_KEY]
+    if bad or not keys:
+        raise ValueError("choose from: " + ", ".join(BY_KEY))
+    return list(dict.fromkeys(keys))
+
+
 @dataclass(frozen=True)
 class Spec:
     default: Any
@@ -64,29 +74,13 @@ class Spec:
 
 
 DEFAULT_PROMPT = """You are watching an Instagram reel. Watch the full video AND listen to the audio.
-Explain the reel so the viewer gets its whole context without rewatching it.
+Answer ONLY the sections requested below, in the order given. Start each section with its heading
+in capitals on its own line. Plain text only, no markdown symbols like ** or #.
+Be specific: quote exact numbers, names and claims. If a section doesn't apply, say so in one line.
 
-Reply in plain text (no markdown symbols like ** or #). Use this structure:
+Requested sections:
 
-SUMMARY
-2-3 sentences on what the reel is about and its main point.
-
-WHAT'S SAID
-The key points from the speech/voiceover, in order. Quote exact numbers, names and claims.
-If there is no speech, say so and describe the audio (music, sounds).
-
-WHAT'S SHOWN
-Important on-screen text, slides, code, products, places or demos that the audio doesn't cover.
-
-TOOLS, LINKS & NAMES
-Every app, website, product, book, person or account mentioned or shown. Write "None" if none.
-
-STEPS / HOW-TO
-If the reel teaches something, the exact steps. Otherwise skip this section.
-
-FACT CHECK
-Flag claims that are misleading, outdated, exaggerated or unverifiable, briefly and honestly.
-Write "Nothing notable" if it holds up.
+{sections}
 
 Context from the post itself:
 Creator: {uploader}
@@ -96,9 +90,10 @@ Caption: {caption}
 
 def _prompt(value: Any) -> str:
     text = str(value).strip()
-    if "{caption}" not in text or "{uploader}" not in text:
-        raise ValueError("prompt must contain the {uploader} and {caption} placeholders")
-    text.format(uploader="x", caption="x")  # fail early on stray braces
+    missing = [p for p in ("{uploader}", "{caption}", "{sections}") if p not in text]
+    if missing:
+        raise ValueError("prompt must contain the placeholders " + ", ".join(missing))
+    text.format(uploader="x", caption="x", sections="x")  # fail early on stray braces
     return text
 
 
@@ -113,6 +108,11 @@ SPECS: dict[str, Spec] = {
     "ADMIN_USER_IDS": Spec([], _ids, "Telegram user IDs allowed to run admin commands"),
     "INSTAGRAM_COOKIES_FILE": Spec("cookies.txt", str, "Path to the Instagram cookies.txt"),
     "LOG_LEVEL": Spec("INFO", _level, "DEBUG, INFO, WARNING or ERROR"),
+    "DEFAULT_SECTIONS": Spec(
+        ["summary", "takeaways", "tools", "steps", "factcheck"], _section_keys,
+        "Sections pre-ticked for a user's first reel",
+    ),
+    "JOB_TTL_MIN": Spec(30, _bounded_int(5, 720), "Minutes a reel stays ready for follow-up questions"),
     "PAUSED": Spec(False, _bool, "When on, the bot refuses new reels"),
     "PROMPT": Spec(DEFAULT_PROMPT, _prompt, "Instructions sent to Gemini (use /prompt)"),
 }
@@ -132,7 +132,10 @@ class Settings:
     def get(self, key: str) -> Any:
         spec = SPECS[key]
         if key in self._overrides:
-            return spec.parse(self._overrides[key])
+            try:
+                return spec.parse(self._overrides[key])
+            except (ValueError, TypeError):
+                pass  # a saved value that a newer version rejects falls back to env/default
         env = os.getenv(key)
         if env is not None and env.strip() != "":
             return spec.parse(env.strip())

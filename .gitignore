@@ -10,3 +10,4 @@ bot.lock
 .ruff_cache/
 settings.json
 *.tmp
+prefs.json

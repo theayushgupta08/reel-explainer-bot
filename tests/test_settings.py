@@ -19,7 +19,7 @@ def test_validation(tmp_path):
     with pytest.raises(ValueError):
         s.set("MAX_CONCURRENT_JOBS", "99")
     with pytest.raises(ValueError):
-        s.set("PROMPT", "no placeholders")
+        s.set("PROMPT", "{uploader} {caption} only")
     with pytest.raises(KeyError):
         s.set("NOPE", "1")
 

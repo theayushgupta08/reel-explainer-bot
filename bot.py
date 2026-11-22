@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import json
 import logging
 import os
 import platform
 import re
+import secrets
 import shutil
 import sys
 import tempfile
 import time
+from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -28,17 +31,26 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
-from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
+from sections import BY_KEY, SECTIONS, build_section_block, ordered
 from settings_store import SPECS, Settings
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -182,33 +194,44 @@ def _generate_with_fallback(contents):
     raise last_error  # type: ignore[misc]
 
 
-def explain_video(video: Path, info: dict) -> str:
+def upload_video(video: Path):
+    """Upload to Gemini and wait until it's ready. Returns the Gemini file handle."""
     client = gemini()
     uploaded = client.files.upload(file=str(video), config={"mime_type": "video/mp4"})
-    try:
-        deadline = time.time() + 180
-        while uploaded.state and uploaded.state.name == "PROCESSING":
-            if time.time() > deadline:
-                raise RuntimeError("Gemini took too long to process the video.")
-            time.sleep(2)
-            uploaded = client.files.get(name=uploaded.name)
-        if uploaded.state and uploaded.state.name == "FAILED":
-            raise RuntimeError("Gemini could not process this video.")
+    deadline = time.time() + 180
+    while uploaded.state and uploaded.state.name == "PROCESSING":
+        if time.time() > deadline:
+            delete_uploaded(uploaded)
+            raise RuntimeError("Gemini took too long to process the video.")
+        time.sleep(2)
+        uploaded = client.files.get(name=uploaded.name)
+    if uploaded.state and uploaded.state.name == "FAILED":
+        delete_uploaded(uploaded)
+        raise RuntimeError("Gemini could not process this video.")
+    return uploaded
 
-        prompt = settings.get("PROMPT").format(
-            uploader=info.get("uploader") or info.get("channel") or "unknown",
-            caption=(info.get("description") or "(no caption)")[:3000],
-        )
-        response = _generate_with_fallback([uploaded, prompt])
-        text = (response.text or "").strip()
-        if not text:
-            raise RuntimeError("Gemini returned an empty answer (it may have been blocked).")
-        return text
-    finally:
-        try:
-            client.files.delete(name=uploaded.name)
-        except Exception:
-            log.warning("Could not delete uploaded file %s", uploaded.name)
+
+def delete_uploaded(uploaded) -> None:
+    try:
+        gemini().files.delete(name=uploaded.name)
+    except Exception:
+        log.warning("Could not delete uploaded file %s", getattr(uploaded, "name", "?"))
+
+
+def build_prompt(info: dict, keys) -> str:
+    return settings.get("PROMPT").format(
+        uploader=info.get("uploader") or info.get("channel") or "unknown",
+        caption=(info.get("description") or "(no caption)")[:3000],
+        sections=build_section_block(keys),
+    )
+
+
+def explain_sections(uploaded, info: dict, keys) -> str:
+    response = _generate_with_fallback([uploaded, build_prompt(info, keys)])
+    text = (response.text or "").strip()
+    if not text:
+        raise RuntimeError("Gemini returned an empty answer (it may have been blocked).")
+    return text
 
 
 # ---------- access control ----------
@@ -331,13 +354,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     for url in dict.fromkeys(urls):  # dedupe, keep order
-        await process_reel(update, context, url)
+        await start_job(update, url)
 
+
+# ---------- reel jobs: prepare in the background while the user picks sections ----------
+
+
+@dataclass
+class ReelJob:
+    id: str
+    url: str
+    user_id: int
+    chat_id: int
+    reply_to: int
+    selected: list[str]
+    stage: str = "Downloading the reel..."
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    error: str | None = None
+    info: dict = field(default_factory=dict)
+    uploaded: object = None
+    workdir: Path | None = None
+    picker_msg: object = None
+    more_msg: object = None
+    requested: bool = False
+    generating: int = 0
+    done: set[str] = field(default_factory=set)
+
+
+jobs: dict[str, ReelJob] = {}
+_stats = {"done": 0, "failed": 0}
+_active_gen = 0
 
 _job_slots: asyncio.Semaphore | None = None
 _job_slots_size = 0
-_active_jobs = 0
-_stats = {"done": 0, "failed": 0}
 
 
 def job_slots() -> asyncio.Semaphore:
@@ -349,66 +398,263 @@ def job_slots() -> asyncio.Semaphore:
     return _job_slots
 
 
-async def process_reel(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
-    global _active_jobs
-    slots = job_slots()
-    queued = slots.locked()
-    status = await update.message.reply_text(
-        "Queued, other reels are being processed..." if queued else "Downloading the reel..."
-    )
-    async with slots:
-        if queued:
-            await status.edit_text("Downloading the reel...")
-        _active_jobs += 1
-        try:
-            ok = await _process_reel(update, context, url, status)
-        finally:
-            _active_jobs -= 1
-        _stats["done" if ok else "failed"] += 1
+# Remembered picks per user, so the next reel starts with the same boxes ticked.
+_PREFS_PATH = BASE_DIR / "prefs.json"
 
 
-async def _process_reel(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, status) -> bool:
-    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
-    workdir = Path(tempfile.mkdtemp(prefix="reel_"))
+def _load_prefs() -> dict[str, list[str]]:
     try:
-        try:
-            video, info = await asyncio.to_thread(download_reel, url, workdir)
-        except yt_dlp.utils.DownloadError as e:
-            log.warning("Download failed for %s: %s", url, e)
-            hint = "" if cookies_file() else (
-                "\n\nInstagram often needs a logged-in session. An admin can send me a cookies.txt file."
-            )
-            await status.edit_text(f"Couldn't download that reel.{hint}")
-            return False
-        except Exception:
-            log.exception("Unexpected download error for %s", url)
-            await status.edit_text("Something went wrong while downloading that reel.")
-            return False
+        return json.loads(_PREFS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
 
-        await status.edit_text("Watching it with Gemini...")
-        await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
-        try:
-            answer = await asyncio.to_thread(explain_video, video, info)
-        except genai_errors.APIError as e:
-            log.warning("Gemini API error: %s", e)
-            code = getattr(e, "code", None)
-            if code == 429:
-                await status.edit_text("Hit the Gemini free-tier rate limit. Try again in a minute.")
-            elif code in (500, 503):
-                await status.edit_text("Gemini's free models are overloaded right now. Try again in a few minutes.")
-            else:
-                await status.edit_text(f"Gemini rejected the request (error {code}).")
-            return False
-        except Exception:
-            log.exception("Gemini failed for %s", url)
-            await status.edit_text("Gemini failed to explain this reel. Try again later.")
-            return False
 
-        await status.delete()
-        await reply_long(update, f"{info.get('uploader') or 'Reel'} | {url}\n\n{answer}")
-        return True
+def user_sections(user_id: int) -> list[str]:
+    saved = [k for k in _load_prefs().get(str(user_id), []) if k in BY_KEY]
+    return saved or list(settings.get("DEFAULT_SECTIONS"))
+
+
+def save_user_sections(user_id: int, keys: list[str]) -> None:
+    prefs = _load_prefs()
+    prefs[str(user_id)] = keys
+    tmp = _PREFS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(prefs), encoding="utf-8")
+    tmp.replace(_PREFS_PATH)
+
+
+def picker_text(job: ReelJob) -> str:
+    if job.error:
+        status = f"⚠️ {job.error}"
+    elif job.ready.is_set():
+        status = "✅ Reel is ready."
+    else:
+        status = f"⏳ {job.stage} You can pick while it loads."
+    return f"What do you want from this reel? Tick any, then tap Explain.\n\n{status}"
+
+
+def picker_keyboard(job: ReelJob) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for s in SECTIONS:
+        mark = "☑️" if s.key in job.selected else "▫️"
+        row.append(InlineKeyboardButton(f"{mark} {s.label}", callback_data=f"t|{job.id}|{s.key}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("Select all", callback_data=f"all|{job.id}"),
+        InlineKeyboardButton("Clear", callback_data=f"none|{job.id}"),
+        InlineKeyboardButton("✖ Cancel", callback_data=f"x|{job.id}"),
+    ])
+    rows.append([InlineKeyboardButton(f"▶️ Explain ({len(job.selected)})", callback_data=f"go|{job.id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def more_keyboard(job: ReelJob) -> InlineKeyboardMarkup | None:
+    left = [s for s in SECTIONS if s.key not in job.done]
+    if not left:
+        return None
+    rows = [
+        [InlineKeyboardButton(s.label, callback_data=f"m|{job.id}|{s.key}") for s in left[i:i + 2]]
+        for i in range(0, len(left), 2)
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+async def _safe_edit(msg, text: str | None = None, markup=None) -> None:
+    """Edit a message, ignoring 'not modified' and deleted-message errors."""
+    if msg is None:
+        return
+    try:
+        if text is None:
+            await msg.edit_reply_markup(reply_markup=markup)
+        else:
+            await msg.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+    except TelegramError as e:
+        if "not modified" not in str(e).lower():
+            log.debug("Edit failed: %s", e)
+
+
+async def start_job(update: Update, url: str) -> None:
+    job = ReelJob(
+        id=secrets.token_hex(4),
+        url=url,
+        user_id=update.effective_user.id,
+        chat_id=update.effective_chat.id,
+        reply_to=update.message.message_id,
+        selected=user_sections(update.effective_user.id),
+    )
+    jobs[job.id] = job
+    job.picker_msg = await update.message.reply_text(picker_text(job), reply_markup=picker_keyboard(job))
+    asyncio.create_task(prepare_job(job))
+
+
+async def prepare_job(job: ReelJob) -> None:
+    """Download and upload to Gemini while the user is still choosing."""
+    try:
+        async with job_slots():
+            job.workdir = Path(tempfile.mkdtemp(prefix="reel_"))
+            video, job.info = await asyncio.to_thread(download_reel, job.url, job.workdir)
+            job.stage = "Sending it to Gemini..."
+            if not job.requested:
+                await _safe_edit(job.picker_msg, picker_text(job), picker_keyboard(job))
+            job.uploaded = await asyncio.to_thread(upload_video, video)
+            shutil.rmtree(job.workdir, ignore_errors=True)  # Gemini has it now
+            job.workdir = None
+    except yt_dlp.utils.DownloadError as e:
+        log.warning("Download failed for %s: %s", job.url, e)
+        hint = "" if cookies_file() else " Instagram often needs a logged-in session; an admin can send cookies.txt."
+        job.error = f"Couldn't download that reel.{hint}"
+    except genai_errors.APIError as e:
+        log.warning("Gemini upload failed: %s", e)
+        job.error = _gemini_error_text(e)
+    except Exception:
+        log.exception("Preparing %s failed", job.url)
+        job.error = "Something went wrong while preparing that reel."
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        job.ready.set()
+    if job.error:
+        _stats["failed"] += 1
+        if not job.requested:
+            await _safe_edit(job.picker_msg, picker_text(job), None)
+        await expire_job(job, delay=0)
+        return
+    if not job.requested:
+        await _safe_edit(job.picker_msg, picker_text(job), picker_keyboard(job))
+    asyncio.create_task(expire_job(job, delay=settings.get("JOB_TTL_MIN") * 60))
+
+
+async def expire_job(job: ReelJob, delay: float) -> None:
+    """Forget a reel and delete its Gemini upload after the follow-up window."""
+    if delay:
+        await asyncio.sleep(delay)
+    while job.generating:  # don't pull the file out from under a running answer
+        await asyncio.sleep(10)
+    if jobs.pop(job.id, None) is None:
+        return
+    if job.uploaded is not None:
+        await asyncio.to_thread(delete_uploaded, job.uploaded)
+    if job.workdir:
+        shutil.rmtree(job.workdir, ignore_errors=True)
+    if not job.error:
+        if not job.requested:
+            await _safe_edit(job.picker_msg, "This reel expired. Send the link again.", None)
+        await _safe_edit(job.more_msg, None, None)
+
+
+def _gemini_error_text(e: genai_errors.APIError) -> str:
+    code = getattr(e, "code", None)
+    if code == 429:
+        return "Hit the Gemini free-tier rate limit. Try again in a minute."
+    if code in (500, 503):
+        return "Gemini's free models are overloaded right now. Try again in a few minutes."
+    return f"Gemini rejected the request (error {code})."
+
+
+async def run_sections(job: ReelJob, keys: list[str], bot) -> None:
+    global _active_gen
+    labels = ", ".join(s.label for s in ordered(keys))
+    waiting = "" if job.ready.is_set() else " (still loading the reel)"
+    status = await bot.send_message(
+        job.chat_id, f"⏳ Working on: {labels}{waiting}", reply_to_message_id=job.reply_to
+    )
+    await job.ready.wait()
+    if job.error:
+        await _safe_edit(status, f"⚠️ {job.error}")
+        return
+    if job.id not in jobs:
+        await _safe_edit(status, "This reel expired. Send the link again.")
+        return
+    job.generating += 1
+    _active_gen += 1
+    try:
+        async with job_slots():
+            await bot.send_chat_action(job.chat_id, ChatAction.TYPING)
+            answer = await asyncio.to_thread(explain_sections, job.uploaded, job.info, keys)
+    except genai_errors.APIError as e:
+        log.warning("Gemini API error: %s", e)
+        _stats["failed"] += 1
+        await _safe_edit(status, _gemini_error_text(e))
+        return
+    except Exception:
+        log.exception("Gemini failed for %s", job.url)
+        _stats["failed"] += 1
+        await _safe_edit(status, "Gemini failed to explain this reel. Try again later.")
+        return
+    finally:
+        job.generating -= 1
+        _active_gen -= 1
+    _stats["done"] += 1
+    job.done.update(keys)
+    try:
+        await status.delete()
+    except TelegramError:
+        pass
+    header = f"{job.info.get('uploader') or 'Reel'} | {job.url}\n\n"
+    for chunk in _split(header + answer):
+        await bot.send_message(job.chat_id, chunk, disable_web_page_preview=True, reply_to_message_id=job.reply_to)
+    await _safe_edit(job.more_msg, None, None)  # only the newest follow-up menu stays live
+    job.more_msg = None
+    markup = more_keyboard(job)
+    if markup and job.id in jobs:
+        job.more_msg = await bot.send_message(
+            job.chat_id,
+            f"Want more from this reel? Tap any (available for {settings.get('JOB_TTL_MIN')} min).",
+            reply_markup=markup,
+        )
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    parts = (q.data or "").split("|")
+    job = jobs.get(parts[1]) if len(parts) > 1 else None
+    if job is None:
+        await q.answer("This reel expired. Send the link again.", show_alert=True)
+        await _safe_edit(q.message, None, None)
+        return
+    if q.from_user.id != job.user_id:
+        await q.answer("Only the person who sent this reel can use these buttons.")
+        return
+    action = parts[0]
+
+    if action in ("t", "all", "none"):
+        if action == "t" and len(parts) == 3 and parts[2] in BY_KEY:
+            key = parts[2]
+            job.selected = [k for k in job.selected if k != key] if key in job.selected else [*job.selected, key]
+        elif action == "all":
+            job.selected = [s.key for s in SECTIONS]
+        elif action == "none":
+            job.selected = []
+        await q.answer()
+        await _safe_edit(q.message, None, picker_keyboard(job))
+    elif action == "go":
+        if job.requested:
+            await q.answer()
+            return
+        if not job.selected:
+            await q.answer("Pick at least one option.", show_alert=True)
+            return
+        await q.answer()
+        keys = [s.key for s in ordered(job.selected)]
+        save_user_sections(job.user_id, keys)
+        job.requested = True
+        await _safe_edit(q.message, "You picked: " + ", ".join(BY_KEY[k].label for k in keys), None)
+        await run_sections(job, keys, context.bot)
+    elif action == "m" and len(parts) == 3 and parts[2] in BY_KEY:
+        if parts[2] in job.done:
+            await q.answer("Already sent above.")
+            return
+        await q.answer()
+        await run_sections(job, [parts[2]], context.bot)
+    elif action == "x":
+        await q.answer("Cancelled")
+        job.requested = True
+        await _safe_edit(q.message, "Cancelled.", None)
+        await job.ready.wait()
+        await expire_job(job, delay=0)
+    else:
+        await q.answer()
 
 
 # ---------- admin handlers ----------
@@ -453,7 +699,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Uptime: {_duration(time.time() - STARTED_AT)}\n"
         f"Host: {platform.node()} ({platform.system()} {platform.machine()})\n"
         f"Memory: {_mem_mb()}\n"
-        f"Jobs: {_active_jobs} active, {_stats['done']} done, {_stats['failed']} failed since start\n"
+        f"Reels: {len(jobs)} open, {_active_gen} generating, "
+        f"{_stats['done']} answers, {_stats['failed']} failures since start\n"
         f"Model: {settings.get('GEMINI_MODEL')} (fallback: {settings.display('GEMINI_FALLBACK_MODELS')})\n"
         f"yt-dlp: {yt_dlp.version.__version__}\n"
         f"Cookies: {cookie_age}"
@@ -660,8 +907,8 @@ async def _restart(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @admin_only
 async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if _active_jobs:
-        await update.message.reply_text(f"{_active_jobs} reel(s) in progress; they'll be cut off.")
+    if _active_gen:
+        await update.message.reply_text(f"{_active_gen} answer(s) in progress; they'll be cut off.")
     await update.message.reply_text("Restarting. Back in about 20 seconds.")
     log.info("Admin %s requested restart", update.effective_user.id)
     await _restart(context)
@@ -793,6 +1040,7 @@ def build_app() -> Application:
     }
     for name, handler in commands.items():
         app.add_handler(CommandHandler(name, handler))
+    app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return app
@@ -810,7 +1058,7 @@ def main() -> None:
     log.info("Starting bot with model %s", settings.get("GEMINI_MODEL"))
     app = build_app()
     # bootstrap_retries=-1: at boot the network may not be up yet, so keep retrying instead of exiting.
-    app.run_polling(allowed_updates=["message"], bootstrap_retries=-1)
+    app.run_polling(allowed_updates=["message", "callback_query"], bootstrap_retries=-1)
     if app.bot_data.get("restart"):
         log.info("Exiting for restart")
         sys.exit(RESTART_EXIT_CODE)
