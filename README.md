@@ -42,20 +42,45 @@ In the Instagram app, tap **Share → Telegram → your bot**, or paste a link s
 - **The bot only runs while this PC is on and you're logged in.** Both launchers update `yt-dlp` on every start, because Instagram changes often break older versions.
 - Downloading reels is against Instagram's terms. Keep it personal and low-volume.
 
+## Control it from Telegram
+
+Admins (`ADMIN_USER_IDS`, or every allowed user if that is empty) get a command menu. Send `/help` for the full list:
+
+- `/status`, `/logs [N]`: health, version, memory, usage, recent log lines
+- `/config`, `/set KEY VALUE`, `/reset KEY`: change the model, fallbacks, timeouts, limits and log level. Changes are saved to `settings.json` and survive restarts. `/set GEMINI_API_KEY ...` deletes your message after saving.
+- `/prompt`, `/setprompt`, `/resetprompt`: view or replace the Gemini instructions
+- `/users`, `/allow ID`, `/deny ID`, `/admin ID`, `/unadmin ID`: manage access
+- `/pause`, `/resume`: stop or start accepting reels from non-admins
+- `/cookies`: check the cookies; send a file named `cookies.txt` to replace it (the message is deleted after saving)
+- `/update`: `git pull` the latest code from GitHub, install requirements and restart
+- `/restart`: restart (also updates yt-dlp)
+
+`TELEGRAM_BOT_TOKEN` can only be changed in `.env` on the server.
+
 ## Server deployment (Oracle Cloud Always Free, Ubuntu)
 
-1. Create an Always Free VM (Ubuntu 22.04/24.04; Ampere A1 or E2.1.Micro). No inbound ports are needed; the bot polls Telegram.
-2. Stop the Windows copy first (`stop-bot.bat`) and remove the Startup shortcut. Two copies polling the same token cause 409 Conflict errors.
-3. On the VM:
-   ```bash
-   git clone https://github.com/<you>/reel-explainer-bot.git && cd reel-explainer-bot
-   ```
-4. From your PC, copy the secrets over: `scp .env cookies.txt ubuntu@<vm-ip>:/tmp/`, then on the VM: `sudo mkdir -p /opt/reel-bot && sudo mv /tmp/.env /tmp/cookies.txt /opt/reel-bot/`.
-5. `sudo bash deploy/setup.sh` installs Python, ffmpeg, 2 GB swap, a locked-down `reelbot` user and the `reel-bot` systemd service.
+The server runs a git checkout at `/opt/reel-bot`, owned by the `reelbot` service user, which pulls from GitHub with a read-only deploy key stored in `/etc/reel-bot/`.
 
-- **Logs:** `journalctl -u reel-bot -f`
-- **Restart:** `sudo systemctl restart reel-bot` (also updates yt-dlp)
-- **Deploy new code:** `sudo bash deploy/update.sh`
+1. Create an Always Free VM (Ubuntu 24.04). No inbound ports are needed; the bot polls Telegram.
+2. Create a deploy key and add it to the repo as read-only (GitHub → Settings → Deploy keys):
+   ```bash
+   sudo mkdir -p /etc/reel-bot && sudo ssh-keygen -t ed25519 -N "" -f /etc/reel-bot/deploy_key
+   sudo cat /etc/reel-bot/deploy_key.pub
+   ```
+3. Clone and configure:
+   ```bash
+   sudo useradd --system --home /opt/reel-bot --shell /usr/sbin/nologin reelbot
+   ssh-keyscan github.com | sudo tee /etc/reel-bot/known_hosts
+   sudo chown -R reelbot:reelbot /etc/reel-bot && sudo chmod 600 /etc/reel-bot/deploy_key
+   SSHCMD="ssh -i /etc/reel-bot/deploy_key -o UserKnownHostsFile=/etc/reel-bot/known_hosts"
+   sudo GIT_SSH_COMMAND="$SSHCMD" git clone git@github.com:<you>/reel-explainer-bot.git /opt/reel-bot
+   sudo git -C /opt/reel-bot config core.sshCommand "$SSHCMD"
+   ```
+4. Copy `.env` and `cookies.txt` into `/opt/reel-bot/`, then run `sudo bash /opt/reel-bot/deploy/setup.sh`.
+5. Stop any other copy of the bot (for example the Windows one). Two copies polling the same token cause 409 Conflict errors.
+
+- **Logs:** `/logs` in Telegram, or `journalctl -u reel-bot -f`
+- **Deploy new code:** push to GitHub, then send `/update`
 
 ## Development
 

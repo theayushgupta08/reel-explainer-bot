@@ -8,3 +8,5 @@ bot.lock
 *.pyc
 .pytest_cache/
 .ruff_cache/
+settings.json
+*.tmp

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-time server setup for Ubuntu 22.04/24.04 (Oracle Cloud Always Free).
-# Usage: sudo bash deploy/setup.sh   (run from inside the cloned repo)
+# The app lives in a git checkout at /opt/reel-bot so /update in Telegram can pull new code.
+# Usage: sudo bash /opt/reel-bot/deploy/setup.sh
 set -euo pipefail
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_DIR=/opt/reel-bot
 
 apt-get update
@@ -16,21 +16,18 @@ if ! swapon --show | grep -q /swapfile; then
   echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
-mkdir -p "$APP_DIR"
-if [ "$REPO_DIR" != "$APP_DIR" ]; then
-  cp "$REPO_DIR"/bot.py "$REPO_DIR"/requirements.txt "$APP_DIR"/
-fi
-python3 -m venv "$APP_DIR/.venv"
+[ -d "$APP_DIR/.git" ] || { echo "Clone the repo into $APP_DIR first (see README)"; exit 1; }
+[ -d "$APP_DIR/.venv" ] || python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install --quiet -U pip
 "$APP_DIR/.venv/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
 
-[ -f "$APP_DIR/.env" ] || { echo "WARNING: copy your .env to $APP_DIR/.env"; }
+[ -f "$APP_DIR/.env" ] || echo "WARNING: put your .env in $APP_DIR/.env"
 chown -R reelbot:reelbot "$APP_DIR"
 chmod 600 "$APP_DIR"/.env "$APP_DIR"/cookies.txt 2>/dev/null || true
 
-cp "$REPO_DIR/deploy/reel-bot.service" /etc/systemd/system/reel-bot.service
+cp "$APP_DIR/deploy/reel-bot.service" /etc/systemd/system/reel-bot.service
 systemctl daemon-reload
 systemctl enable reel-bot
 systemctl restart reel-bot
 systemctl --no-pager status reel-bot || true
-echo "Done. Logs: journalctl -u reel-bot -f"
+echo "Done. Logs: journalctl -u reel-bot -f   (or /logs in Telegram)"
